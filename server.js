@@ -8,7 +8,7 @@ const path = require('path');
 const http = require('http');
 const { Server } = require('socket.io');
 const compression = require('compression');
-const expressMongoSanitize = require('express-mongo-sanitize');
+const expressMongoSanitize = require('@exortek/express-mongo-sanitize');
 const cron = require('node-cron');
 
 // Import services and middleware
