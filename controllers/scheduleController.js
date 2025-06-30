@@ -1,21 +1,95 @@
-// controllers/scheduleController.js - FIXED VERSION
+// controllers/scheduleController.js - ENHANCED VERSION FOR NEW SCHEMA
 const Schedule = require('../models/Schedule');
 const Content = require('../models/Content');
 const moment = require('moment-timezone');
 const AuditLog = require('../models/AuditLog');
 
+// Enhanced schedule creation with new fields support
 const createSchedule = async (req, res) => {
   try {
-    const data = { ...req.body, createdBy: req.user._id };
+    console.log('Creating schedule with data:', req.body);
     
-    const schedule = await Schedule.create(data);
+    // Extract and validate the content array structure
+    let contentArray = [];
+    if (req.body.content && Array.isArray(req.body.content)) {
+      contentArray = req.body.content.map((item, index) => ({
+        contentId: item.contentId || item,
+        order: item.order !== undefined ? item.order : index,
+        customDuration: item.customDuration || 10
+      }));
+    } else if (req.body.contentIds && Array.isArray(req.body.contentIds)) {
+      // Handle contentIds array from frontend form
+      contentArray = req.body.contentIds.map((id, index) => ({
+        contentId: id,
+        order: index,
+        customDuration: 10
+      }));
+    }
+
+    // Prepare enhanced schedule data with all new fields
+    const scheduleData = {
+      name: req.body.name?.trim(),
+      description: req.body.description?.trim() || '',
+      content: contentArray,
+      devices: req.body.devices || [],
+      startDate: req.body.startDate,
+      endDate: req.body.endDate,
+      startTime: req.body.startTime,
+      endTime: req.body.endTime,
+      timezone: req.body.timezone || 'Asia/Kolkata',
+      repeat: req.body.repeat || 'none',
+      weekDays: req.body.repeat === 'weekly' ? (req.body.weekDays || []) : [],
+      priority: Math.min(Math.max(parseInt(req.body.priority) || 1, 1), 10),
+      isActive: req.body.isActive !== undefined ? req.body.isActive : true,
+      createdBy: req.user._id,
+      originalTimezone: req.body.timezone || 'Asia/Kolkata'
+    };
+
+    console.log('Processed schedule data:', scheduleData);
+
+    // Validate content exists and is approved
+    if (contentArray.length > 0) {
+      const contentIds = contentArray.map(item => item.contentId);
+      const existingContent = await Content.find({
+        _id: { $in: contentIds },
+        status: 'approved'
+      });
+
+      if (existingContent.length !== contentIds.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'Some selected content items are not found or not approved'
+        });
+      }
+    }
+
+    // Create the schedule
+    const schedule = await Schedule.create(scheduleData);
+    
+    // Populate the created schedule
     await schedule.populate([
-      { path: 'content.contentId', select: 'title type duration filePath url htmlContent' },
+      { path: 'content.contentId', select: 'title type duration filePath url htmlContent mimeType' },
       { path: 'devices', select: 'name deviceId location status' },
-      { path: 'createdBy', select: 'name email' }
+      { path: 'createdBy', select: 'name email role' }
     ]);
 
-    // Emit real-time update if socket.io is available
+    // Log schedule creation
+    await AuditLog.create({
+      action: 'SCHEDULE_CREATE',
+      userId: req.user._id,
+      targetId: schedule._id,
+      targetType: 'SCHEDULE',
+      details: { 
+        scheduleName: schedule.name,
+        timezone: schedule.timezone,
+        repeat: schedule.repeat,
+        priority: schedule.priority
+      },
+      ipAddress: req.ip,
+      userAgent: req.get('User-Agent')
+    });
+
+    // Emit real-time updates if socket.io is available
     if (req.app.get('socketio')) {
       req.app.get('socketio').emit('schedule-created', {
         schedule: schedule,
@@ -29,83 +103,257 @@ const createSchedule = async (req, res) => {
       });
     }
 
-    res.status(201).json({ success: true, data: schedule });
+    res.status(201).json({ 
+      success: true, 
+      data: schedule,
+      message: 'Schedule created successfully'
+    });
+
   } catch (error) {
     console.error('Create schedule error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    
+    // Log the error
+    try {
+      await AuditLog.create({
+        action: 'SCHEDULE_CREATE',
+        userId: req.user._id,
+        success: false,
+        errorMessage: error.message,
+        severity: 'HIGH',
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent')
+      });
+    } catch (auditError) {
+      console.error('Failed to log schedule creation error:', auditError);
+    }
+
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to create schedule'
+    });
   }
 };
 
+// Enhanced get schedules with filtering and search
 const getSchedules = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
     
+    // Build filter object
     let filter = {};
-    if (req.query.isActive !== undefined) filter.isActive = req.query.isActive === 'true';
-    if (req.query.deviceId) filter.devices = req.query.deviceId;
-    
+    if (req.query.isActive !== undefined) {
+      filter.isActive = req.query.isActive === 'true';
+    }
+    if (req.query.deviceId) {
+      filter.devices = req.query.deviceId;
+    }
+    if (req.query.timezone) {
+      filter.timezone = req.query.timezone;
+    }
+    if (req.query.repeat) {
+      filter.repeat = req.query.repeat;
+    }
+    if (req.query.priority) {
+      filter.priority = parseInt(req.query.priority);
+    }
+    if (req.query.search) {
+      filter.$or = [
+        { name: { $regex: req.query.search, $options: 'i' } },
+        { description: { $regex: req.query.search, $options: 'i' } }
+      ];
+    }
+
+    // Get schedules with enhanced population
     const schedules = await Schedule.find(filter)
       .populate([
-        { path: 'content.contentId', select: 'title type duration' },
-        { path: 'devices', select: 'name deviceId location' },
-        { path: 'createdBy', select: 'name email' }
+        { 
+          path: 'content.contentId', 
+          select: 'title type duration filePath mimeType status',
+          match: { status: 'approved' }
+        },
+        { path: 'devices', select: 'name deviceId location status' },
+        { path: 'createdBy', select: 'name email role' }
       ])
-      .sort({ createdAt: -1 })
+      .sort({ priority: -1, createdAt: -1 })
       .skip(skip)
-      .limit(limit);
-    
+      .limit(limit)
+      .lean();
+
+    // Get total count for pagination
     const total = await Schedule.countDocuments(filter);
+
+    // Add current status to each schedule
+    const schedulesWithStatus = schedules.map(schedule => {
+      try {
+        const scheduleDoc = new Schedule(schedule);
+        return {
+          ...schedule,
+          currentStatus: scheduleDoc.currentStatus,
+          isCurrentlyActive: scheduleDoc.isCurrentlyActive()
+        };
+      } catch (error) {
+        console.error('Error getting schedule status:', error);
+        return {
+          ...schedule,
+          currentStatus: { status: 'error', message: 'Status unavailable' },
+          isCurrentlyActive: false
+        };
+      }
+    });
     
     res.json({ 
       success: true, 
-      data: schedules, 
-      pagination: { page, limit, total, pages: Math.ceil(total / limit) }
+      data: schedulesWithStatus, 
+      pagination: { 
+        page, 
+        limit, 
+        total, 
+        pages: Math.ceil(total / limit) 
+      },
+      filters: filter
     });
+
   } catch (error) {
     console.error('Get schedules error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to get schedules'
+    });
   }
 };
 
+// Get single schedule by ID with enhanced details
 const getScheduleById = async (req, res) => {
   try {
     const schedule = await Schedule.findById(req.params.id)
       .populate([
-        { path: 'content.contentId', select: 'title type duration' },
-        { path: 'devices', select: 'name deviceId location' },
-        { path: 'createdBy', select: 'name email' }
+        { 
+          path: 'content.contentId', 
+          select: 'title type duration filePath url htmlContent mimeType status createdAt'
+        },
+        { path: 'devices', select: 'name deviceId location status' },
+        { path: 'createdBy', select: 'name email role' }
       ]);
     
     if (!schedule) {
-      return res.status(404).json({ success: false, message: 'Schedule not found' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Schedule not found' 
+      });
     }
+
+    // Add enhanced status information
+    const scheduleData = schedule.toObject();
+    scheduleData.currentStatus = schedule.currentStatus;
+    scheduleData.isCurrentlyActive = schedule.isCurrentlyActive();
+    scheduleData.timesInIST = schedule.getTimesInIST();
+    scheduleData.durationInMinutes = schedule.getDurationInMinutes();
     
-    res.json({ success: true, data: schedule });
+    res.json({ success: true, data: scheduleData });
+
   } catch (error) {
     console.error('Get schedule by ID error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to get schedule'
+    });
   }
 };
 
+// Enhanced schedule update with new fields support
 const updateSchedule = async (req, res) => {
   try {
-    console.log("Update payload content array:", req.body.content);
+    console.log('Updating schedule with data:', req.body);
     
+    // Extract and validate the content array structure
+    let contentArray = [];
+    if (req.body.content && Array.isArray(req.body.content)) {
+      contentArray = req.body.content.map((item, index) => ({
+        contentId: item.contentId || item,
+        order: item.order !== undefined ? item.order : index,
+        customDuration: item.customDuration || 10
+      }));
+    } else if (req.body.contentIds && Array.isArray(req.body.contentIds)) {
+      contentArray = req.body.contentIds.map((id, index) => ({
+        contentId: id,
+        order: index,
+        customDuration: 10
+      }));
+    }
+
+    // Prepare update data
+    const updateData = {
+      name: req.body.name?.trim(),
+      description: req.body.description?.trim(),
+      content: contentArray,
+      devices: req.body.devices,
+      startDate: req.body.startDate,
+      endDate: req.body.endDate,
+      startTime: req.body.startTime,
+      endTime: req.body.endTime,
+      timezone: req.body.timezone,
+      repeat: req.body.repeat,
+      weekDays: req.body.repeat === 'weekly' ? (req.body.weekDays || []) : [],
+      priority: Math.min(Math.max(parseInt(req.body.priority) || 1, 1), 10),
+      isActive: req.body.isActive
+    };
+
+    // Remove undefined values
+    Object.keys(updateData).forEach(key => {
+      if (updateData[key] === undefined) {
+        delete updateData[key];
+      }
+    });
+
+    // Validate content if provided
+    if (contentArray.length > 0) {
+      const contentIds = contentArray.map(item => item.contentId);
+      const existingContent = await Content.find({
+        _id: { $in: contentIds },
+        status: 'approved'
+      });
+
+      if (existingContent.length !== contentIds.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'Some selected content items are not found or not approved'
+        });
+      }
+    }
+
+    // Update the schedule
     const schedule = await Schedule.findByIdAndUpdate(
       req.params.id, 
-      req.body, 
+      updateData, 
       { new: true, runValidators: true }
     ).populate([
-      { path: 'content.contentId', select: 'title type duration' },
-      { path: 'devices', select: 'name deviceId location' },
-      { path: 'createdBy', select: 'name email' }
+      { path: 'content.contentId', select: 'title type duration filePath url htmlContent mimeType' },
+      { path: 'devices', select: 'name deviceId location status' },
+      { path: 'createdBy', select: 'name email role' }
     ]);
     
     if (!schedule) {
-      return res.status(404).json({ success: false, message: 'Schedule not found' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Schedule not found' 
+      });
     }
+
+    // Log schedule update
+    await AuditLog.create({
+      action: 'SCHEDULE_UPDATE',
+      userId: req.user._id,
+      targetId: schedule._id,
+      targetType: 'SCHEDULE',
+      details: { 
+        scheduleName: schedule.name,
+        updatedFields: Object.keys(updateData)
+      },
+      ipAddress: req.ip,
+      userAgent: req.get('User-Agent')
+    });
 
     // Emit real-time update if socket.io is available
     if (req.app.get('socketio')) {
@@ -114,22 +362,53 @@ const updateSchedule = async (req, res) => {
         message: `Schedule "${schedule.name}" updated`,
         timestamp: new Date()
       });
+
+      req.app.get('socketio').emit('content-refresh', {
+        message: 'Schedule updated, checking for new content',
+        timestamp: new Date()
+      });
     }
     
-    res.json({ success: true, data: schedule });
+    res.json({ 
+      success: true, 
+      data: schedule,
+      message: 'Schedule updated successfully'
+    });
+
   } catch (error) {
     console.error('Update schedule error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to update schedule'
+    });
   }
 };
 
+// Enhanced schedule deletion
 const deleteSchedule = async (req, res) => {
   try {
     const schedule = await Schedule.findByIdAndDelete(req.params.id);
     
     if (!schedule) {
-      return res.status(404).json({ success: false, message: 'Schedule not found' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Schedule not found' 
+      });
     }
+
+    // Log schedule deletion
+    await AuditLog.create({
+      action: 'SCHEDULE_DELETE',
+      userId: req.user._id,
+      targetId: schedule._id,
+      targetType: 'SCHEDULE',
+      details: { 
+        scheduleName: schedule.name,
+        deletedAt: new Date()
+      },
+      ipAddress: req.ip,
+      userAgent: req.get('User-Agent')
+    });
 
     // Emit real-time update if socket.io is available
     if (req.app.get('socketio')) {
@@ -139,117 +418,39 @@ const deleteSchedule = async (req, res) => {
         message: `Schedule "${schedule.name}" deleted`,
         timestamp: new Date()
       });
+
+      req.app.get('socketio').emit('content-refresh', {
+        message: 'Schedule deleted, checking for content changes',
+        timestamp: new Date()
+      });
     }
     
-    res.json({ success: true, message: 'Schedule deleted successfully' });
+    res.json({ 
+      success: true, 
+      message: 'Schedule deleted successfully',
+      data: { id: schedule._id, name: schedule.name }
+    });
+
   } catch (error) {
     console.error('Delete schedule error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to delete schedule'
+    });
   }
 };
 
+// COMPLETELY REWRITTEN: Use enhanced schema method for current schedule
 const getCurrentScheduleForViewer = async (req, res) => {
   try {
-    console.log('=== Getting Current Schedule for Viewer ===');
+    console.log('=== Getting Current Schedule for Viewer (Enhanced) ===');
     
-    const schedules = await Schedule.find({ isActive: true })
-      .populate({
-        path: 'content.contentId',
-        match: { status: 'approved' },
-        select: 'title type duration filePath url htmlContent mimeType'
-      })
-      .populate('devices', 'name deviceId location status')
-      .lean();
+    // Use the enhanced static method from the schema
+    const activeSchedules = await Schedule.findCurrentlyActive();
+    
+    console.log(`Found ${activeSchedules.length} currently active schedules`);
 
-    console.log(`Found ${schedules.length} active schedules`);
-
-    if (!schedules.length) {
-      return res.json({
-        success: true,
-        data: null,
-        message: 'No active schedules found'
-      });
-    }
-
-    const nowUtc = moment.utc();
-    console.log('Current UTC time:', nowUtc.format());
-
-    let activeSchedule = null;
-    let bestPriority = 0;
-
-    for (const schedule of schedules) {
-      try {
-        if (!schedule.content || !schedule.content.length) {
-          console.log(`Schedule ${schedule.name} has no content, skipping`);
-          continue;
-        }
-
-        const validContent = schedule.content.filter(c => c.contentId);
-        if (!validContent.length) {
-          console.log(`Schedule ${schedule.name} has no approved content, skipping`);
-          continue;
-        }
-
-        const timezone = schedule.timezone || 'UTC';
-        console.log(`Checking schedule: ${schedule.name} in timezone: ${timezone}`);
-
-        const nowInScheduleTimezone = nowUtc.clone().tz(timezone);
-        console.log('Current time in schedule timezone:', nowInScheduleTimezone.format());
-
-        const [startHour, startMinute] = schedule.startTime.split(':').map(Number);
-        const [endHour, endMinute] = schedule.endTime.split(':').map(Number);
-
-        let scheduleStart = moment.tz(schedule.startDate, timezone)
-          .hour(startHour)
-          .minute(startMinute)
-          .second(0)
-          .millisecond(0);
-
-        let scheduleEnd = moment.tz(schedule.endDate, timezone)
-          .hour(endHour)
-          .minute(endMinute)
-          .second(0)
-          .millisecond(0);
-
-        // Handle overnight schedules
-        if (endHour < startHour || (endHour === startHour && endMinute <= startMinute)) {
-          scheduleEnd.add(1, 'day');
-        }
-
-        console.log('Schedule start:', scheduleStart.format());
-        console.log('Schedule end:', scheduleEnd.format());
-
-        const isWithinDateRange = nowInScheduleTimezone.isBetween(
-          moment.tz(schedule.startDate, timezone).startOf('day'),
-          moment.tz(schedule.endDate, timezone).endOf('day'),
-          null, '[]'
-        );
-
-        const isWithinTimeRange = nowInScheduleTimezone.isBetween(scheduleStart, scheduleEnd, null, '[]');
-
-        console.log('Within date range:', isWithinDateRange);
-        console.log('Within time range:', isWithinTimeRange);
-
-        if (isWithinDateRange && isWithinTimeRange) {
-          console.log(`✅ Schedule ${schedule.name} is currently active!`);
-          
-          const priority = schedule.priority || 1;
-          if (!activeSchedule || priority > bestPriority) {
-            activeSchedule = schedule;
-            bestPriority = priority;
-            console.log(`New best schedule: ${schedule.name} (priority: ${priority})`);
-          }
-        } else {
-          console.log(`❌ Schedule ${schedule.name} is not currently active`);
-        }
-      } catch (scheduleError) {
-        console.error(`Error processing schedule ${schedule.name}:`, scheduleError);
-        continue;
-      }
-    }
-
-    if (!activeSchedule) {
-      console.log('No active schedule found');
+    if (!activeSchedules.length) {
       return res.json({
         success: true,
         data: null,
@@ -257,6 +458,8 @@ const getCurrentScheduleForViewer = async (req, res) => {
       });
     }
 
+    // Get the highest priority schedule (they're already sorted by priority)
+    const activeSchedule = activeSchedules[0];
     const validContent = activeSchedule.content.filter(c => c.contentId);
     const contentToPlay = validContent[0]?.contentId;
 
@@ -269,7 +472,7 @@ const getCurrentScheduleForViewer = async (req, res) => {
       });
     }
 
-    console.log(`✅ Returning content: ${contentToPlay.title}`);
+    console.log(`✅ Returning content: ${contentToPlay.title} from schedule: ${activeSchedule.name}`);
 
     // Log successful content delivery
     try {
@@ -281,6 +484,9 @@ const getCurrentScheduleForViewer = async (req, res) => {
         details: {
           contentTitle: contentToPlay.title,
           scheduleName: activeSchedule.name,
+          scheduleTimezone: activeSchedule.timezone,
+          scheduleRepeat: activeSchedule.repeat,
+          schedulePriority: activeSchedule.priority,
           deliveryTime: new Date()
         },
         ipAddress: req.ip,
@@ -290,14 +496,20 @@ const getCurrentScheduleForViewer = async (req, res) => {
       console.error('Failed to log content delivery:', auditError);
     }
 
+    // Return enhanced content data
     res.json({
       success: true,
       data: {
         ...contentToPlay,
         schedule: {
+          _id: activeSchedule._id,
           name: activeSchedule.name,
           description: activeSchedule.description,
-          priority: activeSchedule.priority
+          priority: activeSchedule.priority,
+          timezone: activeSchedule.timezone,
+          repeat: activeSchedule.repeat,
+          startTime: activeSchedule.startTime,
+          endTime: activeSchedule.endTime
         }
       },
       message: 'Content found successfully'
@@ -328,12 +540,62 @@ const getCurrentScheduleForViewer = async (req, res) => {
   }
 };
 
-// Export all functions using module.exports (CONSISTENT PATTERN)
+// NEW: Get schedule statistics
+const getScheduleStatistics = async (req, res) => {
+  try {
+    const stats = await Schedule.getStatistics();
+    
+    // Get currently active schedules count
+    const activeSchedules = await Schedule.findCurrentlyActive();
+    
+    res.json({
+      success: true,
+      data: {
+        ...stats,
+        currentlyActiveSchedules: activeSchedules.length,
+        timestamp: new Date()
+      }
+    });
+
+  } catch (error) {
+    console.error('Get schedule statistics error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to get schedule statistics'
+    });
+  }
+};
+
+// NEW: Get schedules by timezone
+const getSchedulesByTimezone = async (req, res) => {
+  try {
+    const timezone = req.params.timezone || 'Asia/Kolkata';
+    const schedules = await Schedule.findByTimezone(timezone);
+    
+    res.json({
+      success: true,
+      data: schedules,
+      timezone: timezone,
+      count: schedules.length
+    });
+
+  } catch (error) {
+    console.error('Get schedules by timezone error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to get schedules by timezone'
+    });
+  }
+};
+
+// Export all functions
 module.exports = {
   createSchedule,
   getSchedules,
   getScheduleById,
   updateSchedule,
   deleteSchedule,
-  getCurrentScheduleForViewer
+  getCurrentScheduleForViewer,
+  getScheduleStatistics,
+  getSchedulesByTimezone
 };
