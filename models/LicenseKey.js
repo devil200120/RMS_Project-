@@ -1,5 +1,4 @@
-// models/LicenseKey.js
-
+// models/LicenseKey.js - FIXED generateKey method
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 
@@ -32,7 +31,7 @@ const licenseKeySchema = new mongoose.Schema({
   },
   expiresAt: {
     type: Date,
-    default: null // null means never expires
+    default: null
   },
   generatedBy: {
     type: mongoose.Schema.Types.ObjectId,
@@ -64,10 +63,20 @@ const licenseKeySchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Generate a 100-character hex license key
-licenseKeySchema.statics.generateKey = function() {
-  // 50 random bytes → 100 hex characters
-  return crypto.randomBytes(50).toString('hex').toUpperCase();
+// FIXED: Generate key method that accepts parameters
+licenseKeySchema.statics.generateKey = function(type, prefix = '') {
+  // Generate base key
+  const baseKey = crypto.randomBytes(40).toString('hex').toUpperCase();
+  
+  // Add type prefix for organization
+  const typePrefix = prefix || type.substring(0, 3);
+  
+  // Add timestamp component for uniqueness
+  const timestamp = Date.now().toString(36).toUpperCase();
+  
+  // Combine and pad to 100 characters
+  const combined = `${typePrefix}-${timestamp}-${baseKey}`;
+  return combined.substring(0, 100).padEnd(100, '0');
 };
 
 // Validate license key usage
