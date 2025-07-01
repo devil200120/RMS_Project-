@@ -1,4 +1,4 @@
-// controllers/scheduleController.js - ENHANCED VERSION FOR NEW SCHEMA
+// controllers/scheduleController.js - CORRECTED VERSION WITH FIXED SYNTAX
 const Schedule = require('../models/Schedule');
 const Content = require('../models/Content');
 const moment = require('moment-timezone');
@@ -73,11 +73,11 @@ const createSchedule = async (req, res) => {
       { path: 'createdBy', select: 'name email role' }
     ]);
 
-    // Log schedule creation
+    // FIXED: Log schedule creation with proper targetId conversion
     await AuditLog.create({
       action: 'SCHEDULE_CREATE',
       userId: req.user._id,
-      targetId: schedule._id,
+      targetId: schedule._id.toString(), // Convert ObjectId to String
       targetType: 'SCHEDULE',
       details: { 
         scheduleName: schedule.name,
@@ -86,7 +86,8 @@ const createSchedule = async (req, res) => {
         priority: schedule.priority
       },
       ipAddress: req.ip,
-      userAgent: req.get('User-Agent')
+      userAgent: req.get('User-Agent'),
+      severity: 'LOW'
     });
 
     // Emit real-time updates if socket.io is available
@@ -112,11 +113,12 @@ const createSchedule = async (req, res) => {
   } catch (error) {
     console.error('Create schedule error:', error);
     
-    // Log the error
+    // FIXED: Log the error with proper error handling
     try {
       await AuditLog.create({
         action: 'SCHEDULE_CREATE',
         userId: req.user._id,
+        targetType: 'SCHEDULE',
         success: false,
         errorMessage: error.message,
         severity: 'HIGH',
@@ -341,18 +343,19 @@ const updateSchedule = async (req, res) => {
       });
     }
 
-    // Log schedule update
+    // FIXED: Log schedule update with proper targetId conversion
     await AuditLog.create({
       action: 'SCHEDULE_UPDATE',
       userId: req.user._id,
-      targetId: schedule._id,
+      targetId: schedule._id.toString(), // Convert ObjectId to String
       targetType: 'SCHEDULE',
       details: { 
         scheduleName: schedule.name,
         updatedFields: Object.keys(updateData)
       },
       ipAddress: req.ip,
-      userAgent: req.get('User-Agent')
+      userAgent: req.get('User-Agent'),
+      severity: 'LOW'
     });
 
     // Emit real-time update if socket.io is available
@@ -396,18 +399,19 @@ const deleteSchedule = async (req, res) => {
       });
     }
 
-    // Log schedule deletion
+    // FIXED: Log schedule deletion with proper targetId conversion
     await AuditLog.create({
       action: 'SCHEDULE_DELETE',
       userId: req.user._id,
-      targetId: schedule._id,
+      targetId: schedule._id.toString(), // Convert ObjectId to String
       targetType: 'SCHEDULE',
       details: { 
         scheduleName: schedule.name,
         deletedAt: new Date()
       },
       ipAddress: req.ip,
-      userAgent: req.get('User-Agent')
+      userAgent: req.get('User-Agent'),
+      severity: 'MEDIUM'
     });
 
     // Emit real-time update if socket.io is available
@@ -474,12 +478,12 @@ const getCurrentScheduleForViewer = async (req, res) => {
 
     console.log(`✅ Returning content: ${contentToPlay.title} from schedule: ${activeSchedule.name}`);
 
-    // Log successful content delivery
+    // FIXED: Log successful content delivery with proper targetId conversion
     try {
       await AuditLog.create({
         action: 'CONTENT_DELIVER',
         userId: null,
-        targetId: contentToPlay._id,
+        targetId: contentToPlay._id.toString(), // Convert ObjectId to String
         targetType: 'CONTENT',
         details: {
           contentTitle: contentToPlay.title,
@@ -490,7 +494,8 @@ const getCurrentScheduleForViewer = async (req, res) => {
           deliveryTime: new Date()
         },
         ipAddress: req.ip,
-        userAgent: req.get('User-Agent')
+        userAgent: req.get('User-Agent'),
+        severity: 'LOW'
       });
     } catch (auditError) {
       console.error('Failed to log content delivery:', auditError);
@@ -522,6 +527,7 @@ const getCurrentScheduleForViewer = async (req, res) => {
       await AuditLog.create({
         action: 'CONTENT_DELIVER',
         userId: null,
+        targetType: 'CONTENT',
         success: false,
         errorMessage: error.message,
         severity: 'HIGH',
