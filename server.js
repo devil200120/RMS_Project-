@@ -66,6 +66,8 @@ app.use('/api/', limiter);
 
 // Serve static files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/api/schedules', require('./routes/schedules'));
+
 
 // Database connection
 mongoose.connect(process.env.MONGO_URI, {
